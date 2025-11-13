@@ -1,0 +1,390 @@
+---
+# ConfigMap for automated tunnel setup script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+    name: cloudflared-setup-script
+    namespace: headscale
+data:
+    setup-tunnel.sh: |
+        #!/bin/sh
+        set -e
+
+        echo "==== Cloudflare Tunnel Automated Setup ===="
+        echo "API Token: ${CLOUDFLARE_API_TOKEN:0:20}..."
+        echo "Domain: ${HEADSCALE_DOMAIN}"
+
+        # Install kubectl in the container
+        apk add --no-cache curl kubectl
+
+        # Verify API Token
+        echo ""
+        echo "Step 1: Verifying API Token..."
+        TOKEN_VERIFY=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+          -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+          -H "Content-Type: application/json")
+
+        if echo "$TOKEN_VERIFY" | grep -q '"success":true'; then
+          echo "✓ API Token is valid"
+        else
+          echo "✗ API Token verification failed"
+          echo "$TOKEN_VERIFY"
+          exit 1
+        fi
+
+        # Get Account ID
+        echo ""
+        echo "Step 2: Fetching Account ID..."
+        ACCOUNTS_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts" \
+          -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+          -H "Content-Type: application/json")
+
+        ACCOUNT_ID=$(echo "$ACCOUNTS_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+        if [ -z "$ACCOUNT_ID" ]; then
+          echo "✗ Failed to get Account ID"
+          echo "$ACCOUNTS_RESPONSE"
+          exit 1
+        fi
+
+        echo "✓ Account ID: ${ACCOUNT_ID}"
+
+        # Get Zone ID from domain
+        echo ""
+        echo "Step 3: Fetching Zone ID for ${HEADSCALE_DOMAIN}..."
+
+        # Extract root domain (e.g., f5.si from headscale.warpflow.f5.si)
+        ROOT_DOMAIN=$(echo "${HEADSCALE_DOMAIN}" | awk -F. '{print $(NF-1)"."$NF}')
+        echo "Root domain: ${ROOT_DOMAIN}"
+
+        ZONES_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=${ROOT_DOMAIN}" \
+          -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+          -H "Content-Type: application/json")
+
+        ZONE_ID=$(echo "$ZONES_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+        if [ -z "$ZONE_ID" ]; then
+          echo "✗ Failed to get Zone ID for ${ROOT_DOMAIN}"
+          echo "$ZONES_RESPONSE"
+          exit 1
+        fi
+
+        echo "✓ Zone ID: ${ZONE_ID}"
+
+        # Check for existing tunnel
+        echo ""
+        echo "Step 4: Checking for existing tunnel..."
+        TUNNEL_NAME="headscale-k8s-tunnel"
+
+        TUNNELS_RESPONSE=$(curl -s -X GET \
+          "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel" \
+          -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+          -H "Content-Type: application/json")
+
+        EXISTING_TUNNEL_ID=$(echo "$TUNNELS_RESPONSE" | grep -o "\"id\":\"[^\"]*\".*\"name\":\"${TUNNEL_NAME}\"" | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
+
+        if [ -n "$EXISTING_TUNNEL_ID" ]; then
+          echo "✓ Found existing tunnel: ${TUNNEL_NAME} (ID: ${EXISTING_TUNNEL_ID})"
+          TUNNEL_ID="$EXISTING_TUNNEL_ID"
+
+          # Get tunnel credentials
+          echo "Fetching existing tunnel credentials..."
+          TUNNEL_INFO=$(curl -s -X GET \
+            "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json")
+
+          TUNNEL_SECRET=$(echo "$TUNNEL_INFO" | grep -o '"tunnel_secret":"[^"]*"' | cut -d'"' -f4)
+
+          if [ -z "$TUNNEL_SECRET" ]; then
+            echo "⚠ Could not retrieve tunnel secret, will create new tunnel..."
+            EXISTING_TUNNEL_ID=""
+          fi
+        fi
+
+        # Create new tunnel if not exists
+        if [ -z "$EXISTING_TUNNEL_ID" ]; then
+          echo ""
+          echo "Step 5: Creating new tunnel..."
+
+          # Generate a random tunnel secret (base64 encoded 32 bytes)
+          TUNNEL_SECRET=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 64 | head -n 1)
+
+          CREATE_RESPONSE=$(curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"name\":\"${TUNNEL_NAME}\",\"tunnel_secret\":\"${TUNNEL_SECRET}\"}")
+
+          TUNNEL_ID=$(echo "$CREATE_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+          if [ -z "$TUNNEL_ID" ]; then
+            echo "✗ Failed to create tunnel"
+            echo "$CREATE_RESPONSE"
+            exit 1
+          fi
+
+          echo "✓ Created tunnel: ${TUNNEL_NAME} (ID: ${TUNNEL_ID})"
+        fi
+
+        # Create credentials.json
+        echo ""
+        echo "Step 6: Creating credentials file..."
+        cat > /tmp/credentials.json <<EOF
+        {
+          "AccountTag": "${ACCOUNT_ID}",
+          "TunnelID": "${TUNNEL_ID}",
+          "TunnelName": "${TUNNEL_NAME}",
+          "TunnelSecret": "${TUNNEL_SECRET}"
+        }
+        EOF
+
+        echo "✓ Credentials file created"
+
+        # Create config.yaml
+        echo ""
+        echo "Step 7: Creating tunnel configuration..."
+        cat > /tmp/config.yaml <<EOF
+        tunnel: ${TUNNEL_ID}
+        credentials-file: /etc/cloudflared/credentials.json
+
+        ingress:
+          - hostname: ${HEADSCALE_DOMAIN}
+            service: http://headscale-service.headscale.svc.cluster.local:8080
+            originRequest:
+              noTLSVerify: true
+              connectTimeout: 30s
+              http2Origin: true
+          - service: http_status:404
+        EOF
+
+        echo "✓ Configuration file created"
+
+        # Configure DNS route
+        echo ""
+        echo "Step 8: Configuring DNS route..."
+
+        # Check if DNS record already exists
+        DNS_RECORDS=$(curl -s -X GET \
+          "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?name=${HEADSCALE_DOMAIN}" \
+          -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+          -H "Content-Type: application/json")
+
+        EXISTING_RECORD_ID=$(echo "$DNS_RECORDS" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+        if [ -n "$EXISTING_RECORD_ID" ]; then
+          echo "DNS record already exists, updating..."
+          DNS_RESPONSE=$(curl -s -X PUT \
+            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${EXISTING_RECORD_ID}" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"type\":\"CNAME\",\"name\":\"${HEADSCALE_DOMAIN}\",\"content\":\"${TUNNEL_ID}.cfargotunnel.com\",\"ttl\":1,\"proxied\":true}")
+        else
+          echo "Creating new DNS record..."
+          DNS_RESPONSE=$(curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"type\":\"CNAME\",\"name\":\"${HEADSCALE_DOMAIN}\",\"content\":\"${TUNNEL_ID}.cfargotunnel.com\",\"ttl\":1,\"proxied\":true}")
+        fi
+
+        if echo "$DNS_RESPONSE" | grep -q '"success":true'; then
+          echo "✓ DNS route configured"
+        else
+          echo "⚠ DNS route configuration may have failed (this might be okay if already configured)"
+          echo "$DNS_RESPONSE"
+        fi
+
+        # Create Kubernetes Secret with credentials
+        echo ""
+        echo "Step 9: Creating Kubernetes resources..."
+        kubectl create secret generic cloudflared-credentials \
+          --from-file=credentials.json=/tmp/credentials.json \
+          --namespace=headscale \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+        # Create Kubernetes ConfigMap with config
+        kubectl create configmap cloudflared-config \
+          --from-file=config.yaml=/tmp/config.yaml \
+          --namespace=headscale \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+        echo "✓ Kubernetes resources created"
+
+        echo ""
+        echo "==== Setup Complete ===="
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Account ID:     ${ACCOUNT_ID}"
+        echo "Zone ID:        ${ZONE_ID}"
+        echo "Tunnel ID:      ${TUNNEL_ID}"
+        echo "Tunnel Name:    ${TUNNEL_NAME}"
+        echo "Hostname:       ${HEADSCALE_DOMAIN}"
+        echo "DNS Target:     ${TUNNEL_ID}.cfargotunnel.com"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Credentials stored in Secret:  cloudflared-credentials"
+        echo "Config stored in ConfigMap:    cloudflared-config"
+        echo ""
+        echo "Your Headscale server will be accessible at:"
+        echo "  https://${HEADSCALE_DOMAIN}"
+        echo ""
+
+---
+# Secret for Cloudflare API Token
+apiVersion: v1
+kind: Secret
+metadata:
+    name: cloudflare-api-token
+    namespace: headscale
+type: Opaque
+stringData:
+    token: "CLOUDFLARE_API_TOKEN_PLACEHOLDER"
+
+---
+# ServiceAccount for setup job
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+    name: cloudflared-setup
+    namespace: headscale
+
+---
+# Role for setup job
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+    name: cloudflared-setup
+    namespace: headscale
+rules:
+    - apiGroups: [""]
+      resources: ["secrets", "configmaps"]
+      verbs: ["get", "list", "create", "update", "patch"]
+
+---
+# RoleBinding for setup job
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+    name: cloudflared-setup
+    namespace: headscale
+subjects:
+    - kind: ServiceAccount
+      name: cloudflared-setup
+      namespace: headscale
+roleRef:
+    kind: Role
+    name: cloudflared-setup
+    apiGroup: rbac.authorization.k8s.io
+
+---
+# Job to setup Cloudflare Tunnel (fully automated)
+apiVersion: batch/v1
+kind: Job
+metadata:
+    name: cloudflared-setup
+    namespace: headscale
+spec:
+    ttlSecondsAfterFinished: 300
+    backoffLimit: 3
+    template:
+        metadata:
+            labels:
+                app: cloudflared-setup
+        spec:
+            restartPolicy: OnFailure
+            serviceAccountName: cloudflared-setup
+            containers:
+                - name: setup
+                  image: alpine:latest
+                  command:
+                      - /bin/sh
+                      - /scripts/setup-tunnel.sh
+                  env:
+                      - name: CLOUDFLARE_API_TOKEN
+                        valueFrom:
+                            secretKeyRef:
+                                name: cloudflare-api-token
+                                key: token
+                      - name: HEADSCALE_DOMAIN
+                        value: "HEADSCALE_DOMAIN_PLACEHOLDER"
+                  volumeMounts:
+                      - name: scripts
+                        mountPath: /scripts
+            volumes:
+                - name: scripts
+                  configMap:
+                      name: cloudflared-setup-script
+                      defaultMode: 0755
+
+---
+# Deployment for Cloudflared (will use credentials created by Job)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: cloudflared
+    namespace: headscale
+    labels:
+        app: cloudflared
+spec:
+    replicas: 2
+    selector:
+        matchLabels:
+            app: cloudflared
+    template:
+        metadata:
+            labels:
+                app: cloudflared
+        spec:
+            containers:
+                - name: cloudflared
+                  image: cloudflare/cloudflared:latest
+                  imagePullPolicy: IfNotPresent
+                  command:
+                      - cloudflared
+                      - tunnel
+                      - --no-autoupdate
+                      - run
+                      - --config
+                      - /etc/cloudflared/config.yaml
+                  env:
+                      - name: TZ
+                        value: "TZ_PLACEHOLDER"
+                  volumeMounts:
+                      - name: config
+                        mountPath: /etc/cloudflared
+                        readOnly: true
+                  resources:
+                      requests:
+                          memory: "64Mi"
+                          cpu: "50m"
+                      limits:
+                          memory: "128Mi"
+                          cpu: "200m"
+                  livenessProbe:
+                      httpGet:
+                          path: /ready
+                          port: 2000
+                      initialDelaySeconds: 30
+                      periodSeconds: 10
+                      failureThreshold: 3
+                      timeoutSeconds: 5
+                  readinessProbe:
+                      httpGet:
+                          path: /ready
+                          port: 2000
+                      initialDelaySeconds: 10
+                      periodSeconds: 5
+                      failureThreshold: 3
+                      timeoutSeconds: 3
+            volumes:
+                - name: config
+                  projected:
+                      sources:
+                          - configMap:
+                                name: cloudflared-config
+                          - secret:
+                                name: cloudflared-credentials
+            securityContext:
+                runAsUser: 65532
+                runAsNonRoot: true
+                fsGroup: 65532

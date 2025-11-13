@@ -1,0 +1,233 @@
+---
+# ConfigMap for Headscale configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+    name: headscale-config
+    namespace: headscale
+data:
+    config.yaml: |
+        # headscale configuration
+        server_url: https://HEADSCALE_DOMAIN_PLACEHOLDER
+        listen_addr: 0.0.0.0:8080
+        metrics_listen_addr: 0.0.0.0:9090
+        grpc_listen_addr: 0.0.0.0:50443
+        grpc_allow_insecure: false
+
+        # Private key configuration
+        private_key_path: /var/lib/headscale/private.key
+        noise:
+          private_key_path: /var/lib/headscale/noise_private.key
+
+        # IP prefixes
+        prefixes:
+          v4: 100.64.0.0/10
+          v6: fd7a:115c:a1e0::/48
+
+        # HTTP/HTTP2 configuration for WebSocket support
+        http:
+          enabled: true
+        http2:
+          enabled: true
+
+        # DERP configuration - use Tailscale's public DERP servers
+        derp:
+          server:
+            enabled: false
+          urls:
+            - https://controlplane.tailscale.com/derpmap/default
+          paths: []
+          auto_update_enabled: true
+          update_frequency: 24h
+
+        # Disable embedded DERP server
+        disable_check_updates: false
+        ephemeral_node_inactivity_timeout: 30m
+        node_update_check_interval: 10s
+
+        # Database configuration
+        database:
+          type: sqlite3
+          sqlite:
+            path: /var/lib/headscale/db.sqlite
+
+        # ACL/Policy configuration
+        policy:
+          path: ""
+
+        # DNS configuration
+        dns:
+          override_local_dns: true
+          nameservers:
+            global:
+              - 1.1.1.1
+              - 1.0.0.1
+          search_domains: []
+          magic_dns: true
+          base_domain: BASE_DOMAIN_PLACEHOLDER
+
+        # UNIX socket configuration
+        unix_socket: /var/run/headscale/headscale.sock
+        unix_socket_permission: "0770"
+
+        # Log level
+        log:
+          level: info
+          format: text
+
+        # TLS configuration
+        tls_letsencrypt_hostname: ""
+        tls_letsencrypt_cache_dir: /var/lib/headscale/cache
+        tls_letsencrypt_challenge_type: HTTP-01
+        tls_letsencrypt_listen: ":http"
+        tls_cert_path: ""
+        tls_key_path: ""
+
+        # OIDC configuration (disabled by default)
+        oidc:
+          issuer: ""
+          client_id: ""
+          client_secret: ""
+          scope:
+            - openid
+            - profile
+            - email
+          extra_params:
+            domain_hint: ""
+          allowed_domains: []
+          allowed_users: []
+          allowed_groups: []
+          expiry: 180d
+          use_expiry_from_token: false
+
+        # Logtail configuration (disabled)
+        logtail:
+          enabled: false
+
+        # Randomize client port
+        randomize_client_port: false
+
+---
+# PersistentVolumeClaim for Headscale data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+    name: headscale-data
+    namespace: headscale
+spec:
+    accessModes:
+        - ReadWriteOnce
+    resources:
+        requests:
+            storage: STORAGE_SIZE_PLACEHOLDER
+    storageClassName: STORAGE_CLASS_PLACEHOLDER
+
+---
+# Service for Headscale
+apiVersion: v1
+kind: Service
+metadata:
+    name: headscale-service
+    namespace: headscale
+    labels:
+        app: headscale
+spec:
+    type: ClusterIP
+    selector:
+        app: headscale
+    ports:
+        - name: http
+          port: 8080
+          targetPort: 8080
+          protocol: TCP
+        - name: metrics
+          port: 9090
+          targetPort: 9090
+          protocol: TCP
+        - name: grpc
+          port: 50443
+          targetPort: 50443
+          protocol: TCP
+
+---
+# Deployment for Headscale
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: headscale
+    namespace: headscale
+    labels:
+        app: headscale
+spec:
+    replicas: 1
+    selector:
+        matchLabels:
+            app: headscale
+    template:
+        metadata:
+            labels:
+                app: headscale
+        spec:
+            containers:
+                - name: headscale
+                  image: headscale/headscale:latest
+                  imagePullPolicy: IfNotPresent
+                  command:
+                      - headscale
+                      - serve
+                  env:
+                      - name: TZ
+                        value: "TZ_PLACEHOLDER"
+                  ports:
+                      - name: http
+                        containerPort: 8080
+                        protocol: TCP
+                      - name: metrics
+                        containerPort: 9090
+                        protocol: TCP
+                      - name: grpc
+                        containerPort: 50443
+                        protocol: TCP
+                  volumeMounts:
+                      - name: config
+                        mountPath: /etc/headscale
+                      - name: data
+                        mountPath: /var/lib/headscale
+                      - name: run
+                        mountPath: /var/run/headscale
+                  resources:
+                      requests:
+                          memory: "128Mi"
+                          cpu: "100m"
+                      limits:
+                          memory: "512Mi"
+                          cpu: "500m"
+                  livenessProbe:
+                      httpGet:
+                          path: /health
+                          port: 8080
+                      initialDelaySeconds: 30
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                      failureThreshold: 3
+                  readinessProbe:
+                      httpGet:
+                          path: /health
+                          port: 8080
+                      initialDelaySeconds: 10
+                      periodSeconds: 5
+                      timeoutSeconds: 3
+                      failureThreshold: 3
+            volumes:
+                - name: config
+                  configMap:
+                      name: headscale-config
+                - name: data
+                  persistentVolumeClaim:
+                      claimName: headscale-data
+                - name: run
+                  emptyDir: {}
+            securityContext:
+                fsGroup: 1000
+                runAsUser: 1000
+                runAsNonRoot: true

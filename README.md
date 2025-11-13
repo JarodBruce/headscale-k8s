@@ -36,7 +36,9 @@ Internet → Cloudflare Edge → Cloudflare Tunnel → Kubernetes Cluster → He
 2. `Access` → `Tunnels`に移動
 3. `Create a tunnel`をクリック
 4. トンネル名を入力（例: `headscale-tunnel`）
-5. トンネルトークンとIDを保存
+5. インストール方法で「Cloudflared」を選択
+6. 表示されるトークンをコピー（`cloudflared tunnel run --token eyJ...` の形式）
+</text>
 
 ### 2. プロジェクトのクローン
 
@@ -58,8 +60,8 @@ cp .env.example .env
 HEADSCALE_DOMAIN=headscale.your-domain.com
 
 # Cloudflare Tunnel Configuration
-CLOUDFLARE_TUNNEL_ID=<your-tunnel-id>
-CLOUDFLARE_TUNNEL_TOKEN=<your-tunnel-token>
+# Paste the entire token from: cloudflared tunnel run --token <YOUR_TOKEN>
+CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoiODQ2ZWFmZDUzNDI1M2Q1M2Q2ZTZiNzRhOWU3MTdiN2EiLCJ0IjoiZjYyZTkzMzktM2U5MS00M2JjLTllZDctMTU5MDE1NjQ1YjAwIiwicyI6Ik16Y3hPREprTUdNdE56UmlaaTAwTW1WbUxXSmhNV1F0WXprNFlqUmxZamxoTVdRMyJ9
 
 # その他の設定（必要に応じて調整）
 ```
@@ -83,11 +85,14 @@ Cloudflare Zero Trustダッシュボードで：
 1. 作成したトンネルを選択
 2. `Public Hostname`タブで`Add a public hostname`をクリック
 3. 以下を設定：
-   - Subdomain: `headscale`
+   - Subdomain: `headscale`（または任意）
    - Domain: `your-domain.com`
    - Path: （空白）
-   - Service: `http://headscale-service.headscale.svc.cluster.local:8080`
+   - Type: `HTTP`
+   - URL: `headscale-service.headscale.svc.cluster.local:8080`
 4. 保存
+
+**注意**: トンネルを作成してトークンを取得した後、上記の Public Hostname 設定を行ってください。
 
 ## 使用方法
 
@@ -209,7 +214,6 @@ headscale/
     │   └── 04-deployment.yaml           # Headscale Deployment
     └── cloudflared/
         ├── 01-secret.yaml.template      # Tunnelトークン（テンプレート）
-        ├── 02-configmap.yaml.template   # Cloudflared設定（テンプレート）
         └── 03-deployment.yaml           # Cloudflared Deployment
 ```
 
@@ -224,7 +228,7 @@ headscale/
 
 デフォルト設定：
 - **Headscale**: 128Mi〜512Mi RAM, 100m〜500m CPU
-- **Cloudflared**: 128Mi〜256Mi RAM, 100m〜500m CPU  
+- **Cloudflared**: 64Mi〜128Mi RAM, 50m〜200m CPU  
 - **Storage**: 1Gi（調整可能）
 
 ## 関連リンク

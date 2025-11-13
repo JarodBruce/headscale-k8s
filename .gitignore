@@ -5,7 +5,6 @@
 
 # Generated files from templates
 k8s/cloudflared/01-secret.yaml
-k8s/cloudflared/02-configmap.yaml
 
 # Backup files
 *.bak

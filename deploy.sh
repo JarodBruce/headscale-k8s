@@ -36,7 +36,6 @@ source .env
 # Validate required environment variables
 required_vars=(
     "HEADSCALE_DOMAIN"
-    "CLOUDFLARE_TUNNEL_ID"
     "CLOUDFLARE_TUNNEL_TOKEN"
     "NAMESPACE"
 )
@@ -95,7 +94,6 @@ apply_template() {
 
     # Replace variables in temp file
     sed -i.bak "s|\${HEADSCALE_DOMAIN}|${HEADSCALE_DOMAIN}|g" "$temp_file"
-    sed -i.bak "s|\${CLOUDFLARE_TUNNEL_ID}|${CLOUDFLARE_TUNNEL_ID}|g" "$temp_file"
     sed -i.bak "s|\${CLOUDFLARE_TUNNEL_TOKEN}|${CLOUDFLARE_TUNNEL_TOKEN}|g" "$temp_file"
     sed -i.bak "s|\${NAMESPACE}|${NAMESPACE}|g" "$temp_file"
     sed -i.bak "s|\${STORAGE_CLASS}|${STORAGE_CLASS}|g" "$temp_file"
@@ -139,7 +137,6 @@ fi
 # Process template files for Cloudflare
 print_info "Processing Cloudflare Tunnel templates..."
 apply_template "k8s/cloudflared/01-secret.yaml.template"
-apply_template "k8s/cloudflared/02-configmap.yaml.template"
 
 # Deploy Headscale
 print_info "Deploying Headscale..."
@@ -155,12 +152,10 @@ kubectl rollout status deployment/headscale -n $NAMESPACE --timeout=300s
 # Deploy Cloudflare Tunnel
 print_info "Deploying Cloudflare Tunnel..."
 kubectl apply -f k8s/cloudflared/01-secret.yaml
-kubectl apply -f k8s/cloudflared/02-configmap.yaml
 kubectl apply -f k8s/cloudflared/03-deployment.yaml
 
 # Clean up generated files
 rm -f k8s/cloudflared/01-secret.yaml
-rm -f k8s/cloudflared/02-configmap.yaml
 
 # Wait for Cloudflare Tunnel to be ready
 print_info "Waiting for Cloudflare Tunnel deployment to be ready..."

@@ -80,6 +80,8 @@ STORAGE_CLASS=${STORAGE_CLASS:-"longhorn"}
 STORAGE_SIZE=${STORAGE_SIZE:-"1Gi"}
 TZ=${TZ:-"Asia/Tokyo"}
 CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-""}
+CLOUDFLARE_ZONE_ID=${CLOUDFLARE_ZONE_ID:-""}
+CLOUDFLARE_TUNNEL_NAME=${CLOUDFLARE_TUNNEL_NAME:-"headscale-k8s-tunnel"}
 
 
 
@@ -90,6 +92,7 @@ print_info "  Storage Class: ${STORAGE_CLASS}"
 print_info "  Storage Size: ${STORAGE_SIZE}"
 print_info "  Timezone: ${TZ}"
 print_info "  Mode: Automatic tunnel setup (using API Token)"
+print_info "  Tunnel Name: ${CLOUDFLARE_TUNNEL_NAME}"
 
 # Test kubectl connection
 print_step "Testing kubectl connection..."
@@ -111,6 +114,7 @@ sed "s|namespace: headscale|namespace: ${NAMESPACE}|g; s|name: headscale|name: $
 
 # Process headscale.yaml
 sed -e "s|HEADSCALE_DOMAIN_PLACEHOLDER|${HEADSCALE_DOMAIN}|g" \
+    -e "s|HEADSCALE_NAMESPACE_PLACEHOLDER|${NAMESPACE}|g" \
     -e "s|STORAGE_CLASS_PLACEHOLDER|${STORAGE_CLASS}|g" \
     -e "s|STORAGE_SIZE_PLACEHOLDER|${STORAGE_SIZE}|g" \
     -e "s|TZ_PLACEHOLDER|${TZ}|g" \
@@ -121,6 +125,9 @@ sed -e "s|HEADSCALE_DOMAIN_PLACEHOLDER|${HEADSCALE_DOMAIN}|g" \
 sed -e "s|HEADSCALE_DOMAIN_PLACEHOLDER|${HEADSCALE_DOMAIN}|g" \
     -e "s|CLOUDFLARE_API_TOKEN_PLACEHOLDER|${CLOUDFLARE_API_TOKEN}|g" \
     -e "s|CLOUDFLARE_ACCOUNT_ID_PLACEHOLDER|${CLOUDFLARE_ACCOUNT_ID}|g" \
+    -e "s|CLOUDFLARE_ZONE_ID_PLACEHOLDER|${CLOUDFLARE_ZONE_ID}|g" \
+    -e "s|CLOUDFLARE_TUNNEL_NAME_PLACEHOLDER|${CLOUDFLARE_TUNNEL_NAME}|g" \
+    -e "s|HEADSCALE_NAMESPACE_PLACEHOLDER|${NAMESPACE}|g" \
     -e "s|TZ_PLACEHOLDER|${TZ}|g" \
     -e "s|namespace: headscale|namespace: ${NAMESPACE}|g" \
     k8s/cloudflared.yaml > "${TMP_DIR}/cloudflared.yaml"

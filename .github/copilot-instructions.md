@@ -27,3 +27,4 @@ Kubernetes (k8s) クラスタ上にHeadscaleをデプロイしたい。
 1.  Headscale用の `config.yaml` の内容（ConfigMap用）。
 2.  Headscaleの `Deployment`, `Service`, `PersistentVolumeClaim` のマニフェスト例。
 3.  Cloudflare Tunnel (cloudflared) をk8s内で実行するための `Deployment` と `ConfigMap`（または `cloudflared` のHelmチャートの `values.yaml`）の設定例。
+3.  Cloudflare の設定に関してはAccount APIを用いてpodが自ら構成を変更して欲しい

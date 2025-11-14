@@ -19,58 +19,41 @@ Kubernetes上にHeadscaleをデプロイし、Cloudflare Tunnelを使用して�
 
 ## 🚀 セットアップ（5分）
 
-### 1. Cloudflare Tunnelの作成
+### 1. Cloudflare APIトークンを準備
 
-```bash
-# cloudflaredをインストール
-brew install cloudflare/cloudflare/cloudflared  # macOS
-# または Linux の場合
-wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-sudo dpkg -i cloudflared-linux-amd64.deb
+1. https://dash.cloudflare.com/profile/api-tokens へアクセス
+2. **Create Token** → **Edit Cloudflare Tunnels** テンプレートを選択
+3. 追加で `Zone > DNS > Edit` パーミッションを付与（自動DNS登録に必要）
+4. 対象リソースを必要なアカウント/ゾーンに限定
+5. トークンを発行してメモしておく（再表示不可）
 
-# トンネルを作成
-cloudflared tunnel create headscale-k8s-tunnel
+> 📝 トークンはセットアップJobが Cloudflare Tunnel 作成・構成・DNS登録をすべて自動で行うためだけに使用します。
 
-# 認証情報を確認
-cat ~/.cloudflared/headscale-k8s-tunnel.json
-```
-
-JSON出力例：
-```json
-{
-  "AccountTag": "abc123def456abc123def456abc123de",
-  "TunnelID": "12345678-1234-1234-1234-123456789abc",
-  "TunnelName": "headscale-k8s-tunnel",
-  "TunnelSecret": "abcdefghijklmnopqrstuvwxyzABCDEF1234567890=="
-}
-```
-
-### 2. Account IDを取得
-
-1. https://dash.cloudflare.com/ にログイン
-2. **左下のメニュー**でアカウント名をクリック
-3. **Account ID** をコピー（32文字の英数字）
-
-### 3. 環境変数を設定
+### 2. `.env` を作成
 
 ```bash
 cp .env.example .env
 nano .env
 ```
 
-`.env` に以下を記入：
+例：
 ```env
 HEADSCALE_DOMAIN=headscale.yourdomain.com
-CLOUDFLARE_ACCOUNT_ID=abc123def456abc123def456abc123de
-CLOUDFLARE_TUNNEL_ID=12345678-1234-1234-1234-123456789abc
-CLOUDFLARE_TUNNEL_SECRET=abcdefghijklmnopqrstuvwxyzABCDEF1234567890==
 NAMESPACE=headscale
 STORAGE_CLASS=longhorn
 STORAGE_SIZE=1Gi
 TZ=Asia/Tokyo
+
+CLOUDFLARE_API_TOKEN=v1.0_xxxxxxxxx
+# 任意（複数アカウント利用時など）
+CLOUDFLARE_ACCOUNT_ID=abc123def456abc123def456abc123de
+# 任意：自動解決がうまくいかない場合に指定
+CLOUDFLARE_ZONE_ID=def456abc123def456abc123def456ab
+# 任意：トンネル名を変えたい場合
+CLOUDFLARE_TUNNEL_NAME=headscale-k8s-tunnel
 ```
 
-### 4. デプロイを実行
+### 3. デプロイを実行
 
 ```bash
 ./deploy.sh
@@ -78,21 +61,11 @@ TZ=Asia/Tokyo
 
 スクリプトが以下を自動実行：
 - Namespaceの作成
-- Headscaleのデプロイ
-- Cloudflared Tunnelのデプロイ
+- HeadscaleのConfigMap/PVC/Deployment/Service展開
+- Cloudflared Deployment と Setup Job の展開
+- Setup Job が Cloudflare API を呼び出し、トンネル作成/取得・ConfigMap/Secret更新・DNS CNAME登録をすべて自動化
 
-### 5. Cloudflareで DNS設定
-
-1. https://dash.cloudflare.com/ → Websites → あなたのドメイン
-2. **DNS** → **Records** → **Add record**
-3. 以下を設定：
-   - **Type**: `CNAME`
-   - **Name**: `headscale`
-   - **Target**: `<TUNNEL_ID>.cfargotunnel.com`
-   - **Proxy status**: `Proxied` (オレンジ色)
-4. **Save**
-
-### 6. ポッドの状態確認
+### 4. ジョブとポッドの状態確認
 
 ```bash
 kubectl get pods -n headscale
@@ -102,6 +75,7 @@ kubectl get pods -n headscale
 # headscale-7f95847f86-xxxxx   1/1     Running   0          2m
 # cloudflared-6b44966-xxxxx    1/1     Running   0          1m
 # cloudflared-5cb74cb-xxxxx    1/1     Running   0          1m
+# cloudflared-setup-xxxxx      0/1     Completed 0          2m
 ```
 
 すべてのポッドが `1/1 Running` または `Running` 状態になるまで待機。
@@ -150,13 +124,13 @@ kubectl logs deploy/headscale -n headscale
 kubectl logs deploy/cloudflared -n headscale
 
 # 以下のエラーが出た場合：
-# Unauthorized: Failed to get tunnel → credentials.json が無効
+# Unauthorized: Failed to get tunnel
 ```
 
 原因と対策：
-- `CLOUDFLARE_ACCOUNT_ID`: APIトークンではなく、Account IDであることを確認
-- `CLOUDFLARE_TUNNEL_ID`: cloudflared tunnel listで確認
-- `CLOUDFLARE_TUNNEL_SECRET`: JSONファイルの `TunnelSecret` フィールドを確認
+- `CLOUDFLARE_API_TOKEN` の権限不足 → `Cloudflare Tunnel` Edit / `Account Settings` Read / `DNS` Edit が付与されているか確認
+- `cloudflared-setup` Job が失敗 → `kubectl logs job/cloudflared-setup -n headscale` で詳細を確認
+- 既存トンネルの状態がおかしい → Cloudflareダッシュボードで同名トンネルを削除して再実行（Jobが再作成可能）
 
 ### ドメインにアクセスできない
 
@@ -164,12 +138,12 @@ kubectl logs deploy/cloudflared -n headscale
 # DNS設定確認
 nslookup headscale.yourdomain.com
 
-# Tunnel設定確認
+# Tunnel設定確認（任意）
 cloudflared tunnel info headscale-k8s-tunnel
 ```
 
 確認項目：
-- [ ] DNSレコード（CNAME）が設定されている
+- [ ] `cloudflared-setup` Job が CNAME レコードを作成できている（Cloudflareダッシュボードまたは Job ログで確認）
 - [ ] Cloudflare Tunnelが接続状態（dashboard確認）
 - [ ] Headscaleが Running 状態
 - [ ] cloudflaredが Running 状態
@@ -202,7 +176,7 @@ headscale-k8s/
 ## 🔒 セキュリティ注意事項
 
 - `.env` ファイルは `.gitignore` に含まれています（バージョン管理に追加しないでください）
-- `CLOUDFLARE_TUNNEL_SECRET` は機密情報です
+- Cloudflare APIトークンは機密情報です
 - Headscaleの秘密鍵はPersistentVolumeに安全に保存されます
 
 ## 📚 詳細情報

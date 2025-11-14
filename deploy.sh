@@ -83,6 +83,15 @@ CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-""}
 CLOUDFLARE_ZONE_ID=${CLOUDFLARE_ZONE_ID:-""}
 CLOUDFLARE_TUNNEL_NAME=${CLOUDFLARE_TUNNEL_NAME:-"headscale-k8s-tunnel"}
 
+# Treat template placeholder values as empty so the setup job can auto-discover
+if [ "${CLOUDFLARE_ACCOUNT_ID}" = "your_account_id_here" ]; then
+    CLOUDFLARE_ACCOUNT_ID=""
+fi
+
+if [ "${CLOUDFLARE_ZONE_ID}" = "your_zone_id_here" ]; then
+    CLOUDFLARE_ZONE_ID=""
+fi
+
 
 
 print_info "Configuration:"

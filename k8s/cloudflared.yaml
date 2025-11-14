@@ -59,191 +59,204 @@ data:
   setup-tunnel.sh: |
     #!/bin/sh
     set -e
-
-        echo "==== Cloudflare Tunnel Automated Setup ===="
+    
+    echo "==== Cloudflare Tunnel Automated Setup ===="
     echo "API Token: ${CLOUDFLARE_API_TOKEN:0:20}..."
     echo "Domain: ${HEADSCALE_DOMAIN}"
     echo "Namespace: ${HEADSCALE_NAMESPACE}"
     echo "Account ID: ${CLOUDFLARE_ACCOUNT_ID:0:20}..."
     echo "Tunnel Name: ${CLOUDFLARE_TUNNEL_NAME:-headscale-k8s-tunnel}"
-
-        # Install required tools
-        apk add --no-cache curl jq kubectl
-
-        # Build kubeconfig from in-cluster service account so kubectl can run
-        SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
-        SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-        if [ ! -f "$SA_TOKEN_PATH" ]; then
-          echo "✗ ServiceAccount token not found"
-          exit 1
+    
+    # Install required tools
+    apk add --no-cache curl jq kubectl
+    
+    # Build kubeconfig from in-cluster service account so kubectl can run
+    SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
+    SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    if [ ! -f "$SA_TOKEN_PATH" ]; then
+      echo "✗ ServiceAccount token not found"
+      exit 1
+    fi
+    
+    export KUBECONFIG=/tmp/kubeconfig
+    cat <<EOF | sed 's/^    //' > "$KUBECONFIG"
+        apiVersion: v1
+        clusters:
+        - cluster:
+            certificate-authority: ${SA_CA_PATH}
+            server: https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}
+          name: in-cluster
+        contexts:
+        - context:
+            cluster: in-cluster
+            namespace: ${HEADSCALE_NAMESPACE}
+            user: in-cluster
+          name: in-cluster
+        current-context: in-cluster
+        kind: Config
+        preferences: {}
+        users:
+        - name: in-cluster
+          user:
+            token: $(cat ${SA_TOKEN_PATH})
+    EOF
+    chmod 600 "$KUBECONFIG"
+    
+    # Verify API Token
+    echo ""
+    echo "Step 1: Verifying API Token..."
+    TOKEN_VERIFY=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+      -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+      -H "Content-Type: application/json")
+    
+    if echo "$TOKEN_VERIFY" | jq -e '.success' > /dev/null; then
+      echo "✓ API Token is valid"
+    else
+      echo "✗ API Token verification failed"
+      echo "$TOKEN_VERIFY" | jq .
+      exit 1
+    fi
+    
+    # Extract Account ID from token if not provided
+    if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+      echo ""
+      echo "Step 2: Getting Account ID..."
+      ACCOUNT_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
+    
+      if [ -z "$ACCOUNT_ID" ]; then
+        echo "✗ Failed to get Account ID from API"
+        exit 1
+      fi
+      echo "✓ Account ID: ${ACCOUNT_ID:0:20}..."
+    else
+      ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID"
+      echo "Step 2: Using provided Account ID"
+    fi
+    
+    # Check for existing tunnel
+    echo ""
+    echo "Step 3: Checking for existing tunnel..."
+    TUNNEL_NAME="${CLOUDFLARE_TUNNEL_NAME:-headscale-k8s-tunnel}"
+    
+    TUNNELS_RESPONSE=$(curl -s -X GET \
+      "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel" \
+      -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+      -H "Content-Type: application/json")
+    
+    EXISTING_TUNNEL=$(echo "$TUNNELS_RESPONSE" | jq -r ".result[] | select(.name == \"${TUNNEL_NAME}\") | .id" | head -1)
+    
+    if [ -n "$EXISTING_TUNNEL" ]; then
+      echo "✓ Found existing tunnel: ${TUNNEL_NAME}"
+      echo "  Tunnel ID: ${EXISTING_TUNNEL}"
+      TUNNEL_ID="$EXISTING_TUNNEL"
+    
+      # Get tunnel token
+      echo "Fetching tunnel token..."
+      TUNNEL_TOKEN=$(curl -s -X GET \
+        "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/token" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json" | jq -r '.result // empty')
+    
+      if [ -z "$TUNNEL_TOKEN" ]; then
+        echo "⚠ Could not retrieve tunnel token, will create new tunnel..."
+        EXISTING_TUNNEL=""
+      fi
+    fi
+    
+    # Create new tunnel if needed
+    if [ -z "$EXISTING_TUNNEL" ]; then
+      echo ""
+      echo "Step 4: Creating new tunnel..."
+    
+      CREATE_RESPONSE=$(curl -s -X POST \
+        "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json" \
+        --data "{\"name\":\"${TUNNEL_NAME}\",\"config_src\":\"cloudflare\"}")
+    
+      TUNNEL_ID=$(echo "$CREATE_RESPONSE" | jq -r '.result.id // empty')
+    
+      if [ -z "$TUNNEL_ID" ]; then
+        echo "✗ Failed to create tunnel"
+        echo "$CREATE_RESPONSE" | jq .
+        exit 1
+      fi
+    
+      echo "✓ Created tunnel: ${TUNNEL_NAME}"
+      echo "  Tunnel ID: ${TUNNEL_ID}"
+    
+      # Get tunnel token
+      TUNNEL_TOKEN=$(curl -s -X GET \
+        "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/token" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json" | jq -r '.result // empty')
+    fi
+    
+    if [ -z "$TUNNEL_TOKEN" ]; then
+      echo "✗ Failed to get tunnel token"
+      exit 1
+    fi
+    
+    # Resolve Zone ID if not provided
+    echo ""
+    echo "Step 5: Resolving Cloudflare Zone ID..."
+    if [ -z "$CLOUDFLARE_ZONE_ID" ]; then
+      SEARCH_DOMAIN="$HEADSCALE_DOMAIN"
+      ZONE_ID=""
+      ZONE_NAME=""
+      while [ -n "$SEARCH_DOMAIN" ]; do
+        ZONE_RESPONSE=$(curl -s -X GET \
+          "https://api.cloudflare.com/client/v4/zones?name=${SEARCH_DOMAIN}&per_page=1" \
+          -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+          -H "Content-Type: application/json")
+    
+        ZONE_ID=$(echo "$ZONE_RESPONSE" | jq -r '.result[0].id // empty')
+        ZONE_NAME=$(echo "$ZONE_RESPONSE" | jq -r '.result[0].name // empty')
+    
+        if [ -n "$ZONE_ID" ]; then
+          break
         fi
-
-        export KUBECONFIG=/tmp/kubeconfig
-        cat > "$KUBECONFIG" <<EOF
-apiVersion: v1
-clusters:
-- cluster:
-    certificate-authority: ${SA_CA_PATH}
-    server: https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}
-  name: in-cluster
-contexts:
-- context:
-    cluster: in-cluster
-    namespace: ${HEADSCALE_NAMESPACE}
-    user: in-cluster
-  name: in-cluster
-current-context: in-cluster
-kind: Config
-preferences: {}
-users:
-- name: in-cluster
-  user:
-    token: $(cat ${SA_TOKEN_PATH})
-EOF
-        chmod 600 "$KUBECONFIG"
-
-        # Verify API Token
-        echo ""
-        echo "Step 1: Verifying API Token..."
-        TOKEN_VERIFY=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+    
+        case "$SEARCH_DOMAIN" in
+          *.*) SEARCH_DOMAIN="${SEARCH_DOMAIN#*.}" ;;
+          *) SEARCH_DOMAIN="" ;;
+        esac
+      done
+    
+      if [ -z "$ZONE_ID" ]; then
+        echo "  Could not match by iterative lookup, trying suffix search across account zones..."
+        ALL_ZONES=$(curl -s -X GET \
+          "https://api.cloudflare.com/client/v4/zones?per_page=50" \
           -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
           -H "Content-Type: application/json")
 
-        if echo "$TOKEN_VERIFY" | jq -e '.success' > /dev/null; then
-          echo "✓ API Token is valid"
-        else
-          echo "✗ API Token verification failed"
-          echo "$TOKEN_VERIFY" | jq .
-          exit 1
-        fi
+        ZONE_ID=$(echo "$ALL_ZONES" | jq -r --arg domain "$HEADSCALE_DOMAIN" '.result[] | select($domain == .name or ($domain | endswith("." + .name))) | .id' | head -1)
+        ZONE_NAME=$(echo "$ALL_ZONES" | jq -r --arg domain "$HEADSCALE_DOMAIN" '.result[] | select($domain == .name or ($domain | endswith("." + .name))) | .name' | head -1)
+      fi
 
-        # Extract Account ID from token if not provided
-        if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-          echo ""
-          echo "Step 2: Getting Account ID..."
-          ACCOUNT_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts" \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
-
-          if [ -z "$ACCOUNT_ID" ]; then
-            echo "✗ Failed to get Account ID from API"
-            exit 1
-          fi
-          echo "✓ Account ID: ${ACCOUNT_ID:0:20}..."
-        else
-          ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID"
-          echo "Step 2: Using provided Account ID"
-        fi
-
-        # Check for existing tunnel
-        echo ""
-        echo "Step 3: Checking for existing tunnel..."
-        TUNNEL_NAME="${CLOUDFLARE_TUNNEL_NAME:-headscale-k8s-tunnel}"
-
-        TUNNELS_RESPONSE=$(curl -s -X GET \
-          "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel" \
-          -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-          -H "Content-Type: application/json")
-
-        EXISTING_TUNNEL=$(echo "$TUNNELS_RESPONSE" | jq -r ".result[] | select(.name == \"${TUNNEL_NAME}\") | .id" | head -1)
-
-        if [ -n "$EXISTING_TUNNEL" ]; then
-          echo "✓ Found existing tunnel: ${TUNNEL_NAME}"
-          echo "  Tunnel ID: ${EXISTING_TUNNEL}"
-          TUNNEL_ID="$EXISTING_TUNNEL"
-
-          # Get tunnel token
-          echo "Fetching tunnel token..."
-          TUNNEL_TOKEN=$(curl -s -X GET \
-            "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/token" \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            -H "Content-Type: application/json" | jq -r '.result // empty')
-
-          if [ -z "$TUNNEL_TOKEN" ]; then
-            echo "⚠ Could not retrieve tunnel token, will create new tunnel..."
-            EXISTING_TUNNEL=""
-          fi
-        fi
-
-        # Create new tunnel if needed
-        if [ -z "$EXISTING_TUNNEL" ]; then
-          echo ""
-          echo "Step 4: Creating new tunnel..."
-
-          CREATE_RESPONSE=$(curl -s -X POST \
-            "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel" \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data "{\"name\":\"${TUNNEL_NAME}\",\"config_src\":\"cloudflare\"}")
-
-          TUNNEL_ID=$(echo "$CREATE_RESPONSE" | jq -r '.result.id // empty')
-
-          if [ -z "$TUNNEL_ID" ]; then
-            echo "✗ Failed to create tunnel"
-            echo "$CREATE_RESPONSE" | jq .
-            exit 1
-          fi
-
-          echo "✓ Created tunnel: ${TUNNEL_NAME}"
-          echo "  Tunnel ID: ${TUNNEL_ID}"
-
-          # Get tunnel token
-          TUNNEL_TOKEN=$(curl -s -X GET \
-            "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/token" \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            -H "Content-Type: application/json" | jq -r '.result // empty')
-        fi
-
-        if [ -z "$TUNNEL_TOKEN" ]; then
-          echo "✗ Failed to get tunnel token"
-          exit 1
-        fi
-
-        # Resolve Zone ID if not provided
-        echo ""
-        echo "Step 5: Resolving Cloudflare Zone ID..."
-        if [ -z "$CLOUDFLARE_ZONE_ID" ]; then
-          SEARCH_DOMAIN="$HEADSCALE_DOMAIN"
-          ZONE_ID=""
-          ZONE_NAME=""
-          while [ -n "$SEARCH_DOMAIN" ]; do
-            ZONE_RESPONSE=$(curl -s -X GET \
-              "https://api.cloudflare.com/client/v4/zones?name=${SEARCH_DOMAIN}&status=active&per_page=1" \
-              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-              -H "Content-Type: application/json")
-
-            ZONE_ID=$(echo "$ZONE_RESPONSE" | jq -r '.result[0].id // empty')
-            ZONE_NAME=$(echo "$ZONE_RESPONSE" | jq -r '.result[0].name // empty')
-
-            if [ -n "$ZONE_ID" ]; then
-              break
-            fi
-
-            case "$SEARCH_DOMAIN" in
-              *.*) SEARCH_DOMAIN="${SEARCH_DOMAIN#*.}" ;;
-              *) SEARCH_DOMAIN="" ;;
-            esac
-          done
-
-          if [ -z "$ZONE_ID" ]; then
-            echo "✗ Failed to resolve Cloudflare Zone ID"
-            exit 1
-          fi
-          echo "✓ Zone ID resolved: ${ZONE_ID} (${ZONE_NAME})"
-        else
-          ZONE_ID="$CLOUDFLARE_ZONE_ID"
-          ZONE_NAME="(provided)"
-          echo "✓ Using provided Zone ID"
-        fi
-
-        # Create config.yaml
-        echo ""
-        echo "Step 6: Creating tunnel configuration..."
-        SERVICE_URL=${HEADSCALE_SERVICE_URL:-"http://headscale-service.${HEADSCALE_NAMESPACE}.svc.cluster.local:8080"}
-        cat > /tmp/config.yaml <<EOF
+      if [ -n "$ZONE_ID" ]; then
+        echo "✓ Zone ID resolved: ${ZONE_ID} (${ZONE_NAME})"
+      else
+        echo "✗ Failed to resolve Cloudflare Zone ID automatically"
+        echo "  Please set CLOUDFLARE_ZONE_ID in your .env (Cloudflare Dashboard → Zone → API or use 'cloudflare/api' CLI)."
+        exit 1
+      fi
+    else
+      ZONE_ID="$CLOUDFLARE_ZONE_ID"
+      ZONE_NAME="(provided)"
+      echo "✓ Using provided Zone ID"
+    fi
+    
+    # Create config.yaml
+    echo ""
+    echo "Step 6: Creating tunnel configuration..."
+    SERVICE_URL=${HEADSCALE_SERVICE_URL:-"http://headscale-service.${HEADSCALE_NAMESPACE}.svc.cluster.local:8080"}
+    cat <<EOF | sed 's/^    //' > /tmp/config.yaml
         tunnel: ${TUNNEL_ID}
         protocol: http2
-
+    
         ingress:
           - hostname: ${HEADSCALE_DOMAIN}
             service: ${SERVICE_URL}
@@ -251,99 +264,110 @@ EOF
               noTLSVerify: true
               connectTimeout: 30s
               http2Origin: true
-          - service: http_status:404
-        EOF
-
-        echo "✓ Configuration file created"
-
-        # Update ConfigMap
-        echo ""
-        echo "Step 7: Updating Kubernetes ConfigMap..."
-        kubectl create configmap cloudflared-config \
-          --from-file=config.yaml=/tmp/config.yaml \
-          --namespace="${HEADSCALE_NAMESPACE}" \
-          --dry-run=client -o yaml | kubectl apply -f -
-
-        echo "✓ ConfigMap updated"
-
-        # Create Secret with tunnel token
-        echo ""
-        echo "Step 8: Creating Kubernetes Secret with tunnel token..."
-        kubectl create secret generic cloudflared-token \
-          --from-literal=token="${TUNNEL_TOKEN}" \
-          --namespace="${HEADSCALE_NAMESPACE}" \
-          --dry-run=client -o yaml | kubectl apply -f -
-
-  echo "✓ Secret created"
-
-  # Create/Update DNS record
-        echo ""
-        echo "Step 9: Ensuring DNS record exists..."
-        TARGET="${TUNNEL_ID}.cfargotunnel.com"
-        DNS_RESPONSE=$(curl -s -X GET \
-          "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=CNAME&name=${HEADSCALE_DOMAIN}" \
-          -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-          -H "Content-Type: application/json")
-
-        DNS_ID=$(echo "$DNS_RESPONSE" | jq -r '.result[0].id // empty')
-
-        if [ -n "$DNS_ID" ]; then
-          UPDATE_PAYLOAD=$(cat <<JSON
-        {"type":"CNAME","name":"${HEADSCALE_DOMAIN}","content":"${TARGET}","proxied":true,"ttl":1}
-JSON
-          )
-          curl -s -X PUT \
-            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${DNS_ID}" \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data "$UPDATE_PAYLOAD" > /tmp/dns-update.json
-          if jq -e '.success' /tmp/dns-update.json > /dev/null; then
-            echo "✓ Updated existing DNS record"
-          else
-            echo "✗ Failed to update DNS record"
-            cat /tmp/dns-update.json | jq .
-            exit 1
-          fi
-        else
-          CREATE_PAYLOAD=$(cat <<JSON
-        {"type":"CNAME","name":"${HEADSCALE_DOMAIN}","content":"${TARGET}","proxied":true,"ttl":1}
-JSON
-          )
-          curl -s -X POST \
-            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data "$CREATE_PAYLOAD" > /tmp/dns-create.json
-          if jq -e '.success' /tmp/dns-create.json > /dev/null; then
-            echo "✓ DNS record created"
-          else
-            echo "✗ Failed to create DNS record"
-            cat /tmp/dns-create.json | jq .
-            exit 1
-          fi
+      - service: http_status:404
+    EOF
+    
+    echo "✓ Configuration file created"
+    
+    # Update ConfigMap
+    echo ""
+    echo "Step 7: Updating Kubernetes ConfigMap..."
+    kubectl create configmap cloudflared-config \
+      --from-file=config.yaml=/tmp/config.yaml \
+      --namespace="${HEADSCALE_NAMESPACE}" \
+      --dry-run=client -o yaml | kubectl apply -f -
+    
+    echo "✓ ConfigMap updated"
+    
+    # Create Secret with tunnel token
+    echo ""
+    echo "Step 8: Creating Kubernetes Secret with tunnel token..."
+    kubectl create secret generic cloudflared-token \
+      --from-literal=token="${TUNNEL_TOKEN}" \
+      --namespace="${HEADSCALE_NAMESPACE}" \
+      --dry-run=client -o yaml | kubectl apply -f -
+    
+    echo "✓ Secret created"
+    
+    # Create/Update DNS record
+    echo ""
+    echo "Step 9: Ensuring DNS record exists..."
+    TARGET="${TUNNEL_ID}.cfargotunnel.com"
+    DNS_RESPONSE=$(curl -s -X GET \
+      "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=CNAME&name=${HEADSCALE_DOMAIN}" \
+      -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+      -H "Content-Type: application/json")
+    
+    DNS_ID=$(echo "$DNS_RESPONSE" | jq -r '.result[0].id // empty')
+    
+    if [ -n "$DNS_ID" ]; then
+      UPDATE_PAYLOAD=$(printf '{"type":"CNAME","name":"%s","content":"%s","proxied":true,"ttl":1}' \
+        "${HEADSCALE_DOMAIN}" "${TARGET}")
+      curl -s -X PUT \
+        "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${DNS_ID}" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json" \
+        --data "$UPDATE_PAYLOAD" > /tmp/dns-update.json
+      if jq -e '.success' /tmp/dns-update.json > /dev/null; then
+        echo "✓ Updated existing DNS record"
+      else
+        echo "✗ Failed to update DNS record"
+        if jq -e '.errors[] | select(.code == 10000)' /tmp/dns-update.json > /dev/null; then
+          echo "  → Cloudflare API token is missing Zone > DNS > Edit permission or the zone is outside this token's scope."
+          echo "    Recreate the token with:"
+          echo "      - Account > Cloudflare Tunnel (Edit/Read)"
+          echo "      - Account > Account Settings (Read)"
+          echo "      - Zone > DNS (Edit) for the zone ${ZONE_NAME:-${HEADSCALE_DOMAIN}}"
+          echo "    Then update the 'cloudflare-api-token' secret and rerun the setup job."
         fi
-
-        echo ""
-        echo "==== Setup Complete ===="
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "Account ID:     ${ACCOUNT_ID:0:20}..."
-        echo "Tunnel ID:      ${TUNNEL_ID}"
-        echo "Tunnel Name:    ${TUNNEL_NAME}"
-        echo "Hostname:       ${HEADSCALE_DOMAIN}"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo ""
-  # Restart deployment to pick up latest config/secret
-  echo ""
-  echo "Step 10: Restarting cloudflared deployment..."
-  kubectl rollout restart deployment/cloudflared -n "${HEADSCALE_NAMESPACE}" || true
-
-  echo ""
-  echo "DNS:           ${HEADSCALE_DOMAIN} -> ${TUNNEL_ID}.cfargotunnel.com"
-  echo ""
-  echo "Check tunnel status:"
-  echo "   kubectl logs -f deploy/cloudflared -n ${HEADSCALE_NAMESPACE}"
-        echo ""
-
+        cat /tmp/dns-update.json | jq .
+        exit 1
+      fi
+    else
+      CREATE_PAYLOAD=$(printf '{"type":"CNAME","name":"%s","content":"%s","proxied":true,"ttl":1}' \
+        "${HEADSCALE_DOMAIN}" "${TARGET}")
+      curl -s -X POST \
+        "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json" \
+        --data "$CREATE_PAYLOAD" > /tmp/dns-create.json
+      if jq -e '.success' /tmp/dns-create.json > /dev/null; then
+        echo "✓ DNS record created"
+      else
+        echo "✗ Failed to create DNS record"
+        if jq -e '.errors[] | select(.code == 10000)' /tmp/dns-create.json > /dev/null; then
+          echo "  → Cloudflare API token is missing Zone > DNS > Edit permission or the zone is outside this token's scope."
+          echo "    Recreate the token with:"
+          echo "      - Account > Cloudflare Tunnel (Edit/Read)"
+          echo "      - Account > Account Settings (Read)"
+          echo "      - Zone > DNS (Edit) for the zone ${ZONE_NAME:-${HEADSCALE_DOMAIN}}"
+          echo "    Then update the 'cloudflare-api-token' secret and rerun the setup job."
+        fi
+        cat /tmp/dns-create.json | jq .
+        exit 1
+      fi
+    fi
+    
+    echo ""
+    echo "==== Setup Complete ===="
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "Account ID:     ${ACCOUNT_ID:0:20}..."
+    echo "Tunnel ID:      ${TUNNEL_ID}"
+    echo "Tunnel Name:    ${TUNNEL_NAME}"
+    echo "Hostname:       ${HEADSCALE_DOMAIN}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    
+    # Restart deployment to pick up latest config/secret
+    echo "Step 10: Restarting cloudflared deployment..."
+    kubectl rollout restart deployment/cloudflared -n "${HEADSCALE_NAMESPACE}" || true
+    
+    echo ""
+    echo "DNS:           ${HEADSCALE_DOMAIN} -> ${TUNNEL_ID}.cfargotunnel.com"
+    echo ""
+    echo "Check tunnel status:"
+    echo "   kubectl logs -f deploy/cloudflared -n ${HEADSCALE_NAMESPACE}"
+    echo ""
 ---
 # Job to setup Cloudflare Tunnel
 apiVersion: batch/v1
@@ -436,10 +460,10 @@ spec:
                       - tunnel
                       - --config
                       - /etc/cloudflared/config.yaml
-                      - --token
-                      - $(CLOUDFLARED_TOKEN)
                       - --no-autoupdate
                       - run
+            - --token
+            - $(CLOUDFLARED_TOKEN)
                   env:
                       - name: CLOUDFLARED_TOKEN
                         valueFrom:

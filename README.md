@@ -45,10 +45,10 @@ STORAGE_SIZE=1Gi
 TZ=Asia/Tokyo
 
 CLOUDFLARE_API_TOKEN=v1.0_xxxxxxxxx
-# 任意（複数アカウント利用時など）
-CLOUDFLARE_ACCOUNT_ID=abc123def456abc123def456abc123de
-# 任意：自動解決がうまくいかない場合に指定
-CLOUDFLARE_ZONE_ID=def456abc123def456abc123def456ab
+# 任意（複数アカウント利用時など）。空欄のままなら自動検出されます。
+CLOUDFLARE_ACCOUNT_ID=
+# 任意：自動解決がうまくいかない場合に指定。空欄のままで自動検出。
+CLOUDFLARE_ZONE_ID=
 # 任意：トンネル名を変えたい場合
 CLOUDFLARE_TUNNEL_NAME=headscale-k8s-tunnel
 ```

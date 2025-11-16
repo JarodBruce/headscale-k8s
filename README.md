@@ -89,6 +89,41 @@ Kubernetes クラスタ上に Headscale と Cloudflare Tunnel (cloudflared) を�
    - スクリプトは `.env` を `source` し、`envsubst` 経由で `k8s/headscale.yaml` と `k8s/cloudflare.yaml` を適用します。
    - 実行後に `kubectl get pods -n ${NAMESPACE}` の結果を表示して完了を確認できます。
 
+## Tailscale クライアント登録
+
+Headscale の Pod と Cloudflare Tunnel が起動したら、Tailscale クライアントを Headscale に参加させます。`HEADSCALE_SERVER_URL` で公開される URL は Cloudflare トンネル経由で到達できることを前提とします。
+
+1. **Pre-Auth Key を発行**
+
+   ```bash
+   # 例: default ユーザー向けに 24h 有効な再利用キーを発行
+   kubectl exec -n ${NAMESPACE} deploy/headscale -- \
+     headscale preauthkeys create --user default --reusable --expiration 24h
+   ```
+
+   - 複数の ACL グループを使う場合は `--user` をユーザー名ごとに変更します。
+   - 使い捨てにしたい場合は `--reusable` を省略し、用途ごとにキーを更新してください。
+
+2. **クライアントで Tailscale を起動**
+
+   ```bash
+   sudo tailscale up \
+     --login-server ${HEADSCALE_SERVER_URL} \
+     --auth-key tskey-auth-k123example456 \
+     --accept-dns=true --reset
+   ```
+
+   - `--login-server` には `.env` で設定した `HEADSCALE_SERVER_URL` を指定します。
+   - 追加のルートやタグを配布したい場合は `--accept-routes` や `--advertise-tags=tag:servers` を付与します。
+
+3. **登録を確認**
+
+   ```bash
+   kubectl exec -n ${NAMESPACE} deploy/headscale -- headscale nodes list
+   ```
+
+   - 新しいノードが `Connected` で表示されれば登録完了です。不要になったノードは `headscale nodes delete <nodeID>` で削除できます。
+
 ## 動作確認と運用
 
 - Pod の状態確認: `kubectl get pods -n ${NAMESPACE}`

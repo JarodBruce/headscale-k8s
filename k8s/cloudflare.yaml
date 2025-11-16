@@ -11,10 +11,6 @@ data:
     ingress:
       - hostname: ${CLOUDFLARE_INGRESS_HOST}
         service: http://headscale.${NAMESPACE}.svc.cluster.local:8080
-        originRequest:
-          httpHostHeader: headscale.${NAMESPACE}.svc.cluster.local
-          connectTimeout: 30s
-          noTLSVerify: true
       - service: http_status:404
 ---
 apiVersion: v1

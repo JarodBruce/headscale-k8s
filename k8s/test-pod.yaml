@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: headscale-test-client
+  namespace: ${NAMESPACE}
+  labels:
+    app: headscale-test-client
+spec:
+  restartPolicy: Never
+  containers:
+    - name: tailscale
+      image: tailscale/tailscale:stable
+      securityContext:
+        capabilities:
+          add:
+            - NET_ADMIN
+            - NET_RAW
+      env:
+        - name: HEADSCALE_SERVER_URL
+          value: ${HEADSCALE_SERVER_URL}
+        - name: TAILSCALE_AUTHKEY
+          value: ${TAILSCALE_AUTHKEY}
+        - name: TAILSCALE_HOSTNAME
+          value: headscale-test-client
+      volumeMounts:
+        - name: state
+          mountPath: /state
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -euo pipefail
+          if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
+            echo "Error: TAILSCALE_AUTHKEY is not set. Please generate a pre-auth key in Headscale and set it in your .env file."
+            exit 1
+          fi
+          rm -f /tmp/tailscaled.sock
+          echo "Starting tailscaled..."
+          tailscaled \
+            --tun=userspace-networking \
+            --state=/state/tailscaled.state \
+            --socket=/tmp/tailscaled.sock \
+            --statedir=/state &
+          
+          until [ -S /tmp/tailscaled.sock ]; do
+            echo "Waiting for tailscaled socket..."
+            sleep 1
+          done
+          
+          echo "Running tailscale up..."
+          tailscale --socket=/tmp/tailscaled.sock up \
+            --login-server=http://headscale.warpflow.f5.si \
+            --hostname="${TAILSCALE_HOSTNAME}" \
+            --authkey="${TAILSCALE_AUTHKEY}" \
+            --timeout=30s \
+            --accept-routes=true \
+            --accept-dns=true \
+            --reset=true
+          
+          echo "Connection successful. Showing status:"
+          tailscale --socket=/tmp/tailscaled.sock status
+
+          # Keep the pod running for a few minutes for debugging, then exit.
+          echo "Test complete. Pod will terminate in 5 minutes."
+          sleep 300
+  volumes:
+    - name: state
+      emptyDir: {}

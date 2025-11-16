@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tailscale-client
+  namespace: ${NAMESPACE}
+  labels:
+    app: tailscale-client
+spec:
+  restartPolicy: Always
+  containers:
+    - name: tailscale
+      image: tailscale/tailscale:stable
+      securityContext:
+        capabilities:
+          add:
+            - NET_ADMIN
+            - NET_RAW
+      env:
+        - name: HEADSCALE_SERVER_URL
+          value: ${HEADSCALE_SERVER_URL}
+        - name: TAILSCALE_AUTHKEY
+          value: ${TAILSCALE_AUTHKEY}
+        - name: TAILSCALE_HOSTNAME
+          value: ${TAILSCALE_HOSTNAME}
+      volumeMounts:
+        - name: state
+          mountPath: /state
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -euo pipefail
+          rm -f /tmp/tailscaled.sock
+          tailscaled \
+            --tun=userspace-networking \
+            --state=/state/tailscaled.state \
+            --socket=/tmp/tailscaled.sock \
+            --statedir=/state &
+          until [ -S /tmp/tailscaled.sock ]; do
+            echo "waiting for tailscaled socket"
+            sleep 1
+          done
+          HOSTNAME_VALUE="${TAILSCALE_HOSTNAME:-tailscale-client}"
+          if [ -n "${TAILSCALE_AUTHKEY}" ]; then
+            tailscale --socket=/tmp/tailscaled.sock up \
+              --login-server=http://headscale.warpflow.fsi \
+              --hostname="${HOSTNAME_VALUE}" \
+              --authkey="${TAILSCALE_AUTHKEY}" \
+              --timeout=30s \
+              --accept-routes=true \
+              --accept-dns=true \
+              --reset=true
+            tailscale --socket=/tmp/tailscaled.sock status
+          else
+            echo "TAILSCALE_AUTHKEY not provided; exec into pod to run tailscale manually."
+          fi
+          tail -f /state/tailscaled.state
+  volumes:
+    - name: state
+      emptyDir: {}

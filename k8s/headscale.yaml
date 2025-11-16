@@ -12,6 +12,10 @@ data:
   config.yaml: |
     server_url: ${HEADSCALE_SERVER_URL}
     listen_addr: ${HEADSCALE_LISTEN_ADDR}
+    grpc_listen_addr: 0.0.0.0:50443
+    proxy_headers:
+      - Upgrade
+      - Connection
     metrics_listen_addr: ${HEADSCALE_METRICS_LISTEN_ADDR}
     log:
       level: ${HEADSCALE_LOG_LEVEL}
@@ -57,24 +61,31 @@ data:
         "group:admins": ["${HEADSCALE_ACL_ADMIN_USER}"],
         "group:guests": ["${HEADSCALE_ACL_GUEST_USERS}"]
       },
+      "hosts": {
+        "headscale.internal": "100.64.0.1"
+      },
       "acls": [
         {
           "action": "accept",
           "src": ["group:admins"],
-          "dst": ["*:*"],
-          "comment": "Admins have full mesh access"
+          "dst": ["*:*"]
         },
         {
           "action": "accept",
           "src": ["group:guests"],
-          "dst": ["${HEADSCALE_ACL_GUEST_ALLOWED_DEST}"],
-          "comment": "Guests have limited access to a single service"
+          "dst": ["headscale.internal:443"]
         }
       ],
       "tagOwners": {
         "tag:admin": ["group:admins"]
       }
     }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: headscale
+  namespace: ${NAMESPACE}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -107,7 +118,7 @@ spec:
     spec:
       containers:
         - name: headscale
-          image: headscale/headscale:0.23.0
+          image: headscale/headscale:0.27.1
           args:
             - serve
             - --config
@@ -156,9 +167,12 @@ spec:
   selector:
     app: headscale
   ports:
-    - name: grpc
+    - name: grpc-http
       port: 8080
       targetPort: 8080
+    - name: grpc
+      port: 50443
+      targetPort: 50443
     - name: metrics
       port: 9090
       targetPort: 9090

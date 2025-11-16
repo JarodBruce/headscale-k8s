@@ -20,7 +20,6 @@ done
 set -a
 source .env
 set +a
-
 required_secrets=(
   CLOUDFLARE_TUNNEL_SECRET
   CLOUDFLARE_TUNNEL_CREDENTIALS_JSON
@@ -42,6 +41,9 @@ kubectl apply -f <(envsubst < k8s/headscale.yaml)
 
 echo "Applying Cloudflare Tunnel manifests to namespace '${NAMESPACE}'..."
 kubectl apply -f <(envsubst < k8s/cloudflare.yaml)
+
+echo "Applying Tailscale Client manifests to namespace '${NAMESPACE}'..."
+kubectl apply -f <(envsubst < k8s/tailscale-client.yaml)
 
 echo "Waiting for pods to become Ready in namespace '${NAMESPACE}'..."
 kubectl get pods -n "${NAMESPACE}"

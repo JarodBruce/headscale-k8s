@@ -24,7 +24,7 @@ metadata:
   namespace: ${NAMESPACE}
 type: Opaque
 stringData:
-  credentials.json: ${CLOUDFLARE_TUNNEL_CREDENTIALS_JSON}
+  credentials.json: '${CLOUDFLARE_TUNNEL_CREDENTIALS_JSON}'
   tunnel-token: ${CLOUDFLARE_TUNNEL_TOKEN}
   tunnel-secret: ${CLOUDFLARE_TUNNEL_SECRET}
 ---

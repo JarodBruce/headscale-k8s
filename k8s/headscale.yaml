@@ -15,20 +15,32 @@ data:
     metrics_listen_addr: ${HEADSCALE_METRICS_LISTEN_ADDR}
     log:
       level: ${HEADSCALE_LOG_LEVEL}
+    noise:
+      private_key_path: ${HEADSCALE_NOISE_PRIVATE_KEY_PATH}
     database:
       type: ${HEADSCALE_DATABASE_TYPE}
       sqlite:
         path: /var/lib/headscale/db.sqlite
     prefixes:
-      allocate_default_route: ${HEADSCALE_ALLOCATION_DEFAULT_ROUTER}
-    dns_config:
+      v4: ${HEADSCALE_PREFIX_V4}
+      v6: ${HEADSCALE_PREFIX_V6}
+      allocation: ${HEADSCALE_PREFIX_ALLOCATION_METHOD}
+    derp:
+      urls:
+        - ${HEADSCALE_DERP_MAP_URL}
+      auto_update_enabled: true
+      update_frequency: ${HEADSCALE_DERP_UPDATE_FREQUENCY}
+    dns:
+      magic_dns: ${HEADSCALE_DNS_MAGICDNS}
+      base_domain: ${HEADSCALE_DNS_BASE_DOMAIN}
       override_local_dns: true
       nameservers:
-        - ${HEADSCALE_DNS_NAMESERVER_1}
-        - ${HEADSCALE_DNS_NAMESERVER_2}
+        global:
+          - ${HEADSCALE_DNS_NAMESERVER_1}
+          - ${HEADSCALE_DNS_NAMESERVER_2}
     policy:
       mode: file
-      path: /etc/headscale/acl.json
+      path: /etc/headscale-acl/acl.json
     preauth_keys:
       expiry: ${HEADSCALE_PREAUTH_KEY_EXPIRY_DAYS}d
     registration_method: ${HEADSCALE_REGISTRATION_METHOD}
@@ -42,8 +54,8 @@ data:
   acl.json: |
     {
       "groups": {
-        "admins": ["${HEADSCALE_ACL_ADMIN_USER}"],
-        "guests": [${HEADSCALE_ACL_GUEST_USERS}]
+        "group:admins": ["${HEADSCALE_ACL_ADMIN_USER}"],
+        "group:guests": ["${HEADSCALE_ACL_GUEST_USERS}"]
       },
       "acls": [
         {
@@ -106,14 +118,12 @@ spec:
             - name: metrics
               containerPort: 9090
           readinessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 20
@@ -121,8 +131,7 @@ spec:
             - name: headscale-config
               mountPath: /etc/headscale
             - name: headscale-acl
-              mountPath: /etc/headscale/acl.json
-              subPath: acl.json
+              mountPath: /etc/headscale-acl
             - name: headscale-data
               mountPath: /var/lib/headscale
       volumes:
